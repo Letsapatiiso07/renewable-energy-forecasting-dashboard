@@ -1,0 +1,40 @@
+# Core Dependencies
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+
+# Data Processing
+pandas
+numpy
+requests
+
+# Machine Learning
+scikit-learn
+xgboost
+tensorflow
+keras
+joblib
+
+# Optimization
+PuLP
+
+# Visualization
+matplotlib
+seaborn
+
+# Workflow Orchestration
+apache-airflow
+apache-airflow-providers-sqlite
+
+# Database
+SQLAlchemy
+
+# Testing
+pytest
+pytest-cov
+httpx
+
+# Utilities
+python-dateutil
+pytz
