@@ -23,10 +23,6 @@ Built with ❤️ for sustainable energy in Africa | Developed in Pretoria, Sout
 
 ---
 
-## 📊 Live Dashboard Preview
-
-![Dashboard Overview](https://via.placeholder.com/800x400/1F2937/FFFFFF?text=Renewable+Energy+Dashboard)
-
 **Key Features:**
 - Real-time 7-day energy forecasts
 - Interactive cost optimization panel
@@ -380,8 +376,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Your Name**
 - 📍 Location: Pretoria, South Africa
-- 💼 LinkedIn: [linkedin.com/in/yourprofile](https://linkedin.com/in/tiiso-letsapa-664990209)
-- 🐙 GitHub: [@yourusername](https://github.com/Letsapatiiso07)
+- 💼 LinkedIn: (https://linkedin.com/in/tiiso-letsapa-664990209)
+- 🐙 GitHub: (https://github.com/Letsapatiiso07)
 - 📧 Email: Letsapamyron07@gmail.com
 
 ---
