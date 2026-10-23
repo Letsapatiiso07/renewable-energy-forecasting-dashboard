@@ -1,74 +1,67 @@
 import React from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { ForecastPoint } from '../services/api';
 
 interface ForecastChartProps {
-  data: any[];
+  points: ForecastPoint[];
   loading: boolean;
+  source?: string;
 }
 
-const ForecastChart: React.FC<ForecastChartProps> = ({ data, loading }) => {
-  const chartData = data.map(item => ({
-    time: new Date(item.timestamp).toLocaleDateString('en-ZA', { month: 'short', day: 'numeric' }),
-    solar: parseFloat(item.solar_forecast_mw.toFixed(1)),
-    wind: parseFloat(item.wind_forecast_mw.toFixed(1)),
-  }));
+const SOLAR = '#d95926';
+const WIND = '#3987e5';
 
+const formatDay = (ts: string) =>
+  new Date(ts).toLocaleDateString('en-ZA', { weekday: 'short', day: 'numeric', month: 'short' });
+
+const formatHour = (ts: string) =>
+  new Date(ts).toLocaleString('en-ZA', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+const ForecastChart: React.FC<ForecastChartProps> = ({ points, loading, source }) => {
   if (loading) {
     return (
       <div className="bg-gray-800 rounded-lg p-6 h-96 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-          <p className="text-gray-400">Loading forecast data...</p>
-        </div>
+        <p className="text-gray-400">Loading forecast...</p>
       </div>
     );
   }
 
-  if (data.length === 0) {
+  if (points.length === 0) {
     return (
       <div className="bg-gray-800 rounded-lg p-6 h-96 flex items-center justify-center">
-        <p className="text-gray-400">No forecast data available. Select a location and click Refresh.</p>
+        <p className="text-gray-400">No forecast loaded. Check that the API is running and the models are trained.</p>
       </div>
     );
   }
+
+  // One tick per day, at midnight
+  const ticks = points.filter((p) => new Date(p.timestamp).getHours() === 0).map((p) => p.timestamp);
 
   return (
     <div className="bg-gray-800 rounded-lg p-6">
-      <h2 className="text-2xl font-bold mb-4">7-Day Energy Forecast</h2>
-      <ResponsiveContainer width="100%" height={400}>
-        <LineChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-          <XAxis 
-            dataKey="time" 
+      <h2 className="text-xl font-semibold mb-1">7-day hourly forecast</h2>
+      <p className="text-gray-400 text-sm mb-4">
+        XGBoost models applied to the live {source ?? 'weather'} forecast. Hypothetical 100 MW plants.
+      </p>
+      <ResponsiveContainer width="100%" height={360}>
+        <LineChart data={points} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+          <CartesianGrid stroke="#374151" vertical={false} />
+          <XAxis dataKey="timestamp" ticks={ticks} tickFormatter={formatDay} stroke="#9CA3AF" style={{ fontSize: '12px' }} />
+          <YAxis
+            domain={[0, 100]}
             stroke="#9CA3AF"
             style={{ fontSize: '12px' }}
-          />
-          <YAxis 
-            stroke="#9CA3AF"
             label={{ value: 'MW', angle: -90, position: 'insideLeft', style: { fill: '#9CA3AF' } }}
-            style={{ fontSize: '12px' }}
           />
-          <Tooltip 
+          <Tooltip
+            labelFormatter={(ts) => formatHour(String(ts))}
+            formatter={(v: number) => `${v.toFixed(1)} MW`}
             contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: '8px' }}
             labelStyle={{ color: '#F3F4F6' }}
           />
           <Legend />
-          <Line 
-            type="monotone" 
-            dataKey="solar" 
-            stroke="#F59E0B" 
-            strokeWidth={3}
-            name="Solar (MW)"
-            dot={{ fill: '#F59E0B', r: 4 }}
-          />
-          <Line 
-            type="monotone" 
-            dataKey="wind" 
-            stroke="#3B82F6" 
-            strokeWidth={3}
-            name="Wind (MW)"
-            dot={{ fill: '#3B82F6', r: 4 }}
-          />
+          <Line type="monotone" dataKey="solar_mw" stroke={SOLAR} strokeWidth={2} dot={false} name="Solar" />
+          <Line type="monotone" dataKey="wind_mw" stroke={WIND} strokeWidth={2} dot={false} name="Wind" />
         </LineChart>
       </ResponsiveContainer>
     </div>

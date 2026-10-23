@@ -1,134 +1,119 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { DollarSign, Zap } from 'lucide-react';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
+import { ForecastPoint, OptimizationResult } from '../services/api';
 
 interface OptimizationPanelProps {
-  onOptimize: (demand: number) => void;
-  result: any;
+  points: ForecastPoint[];
+  onOptimize: (demand: number, point: ForecastPoint) => void;
+  result: OptimizationResult | null;
 }
 
-const OptimizationPanel: React.FC<OptimizationPanelProps> = ({ onOptimize, result }) => {
-  const [demand, setDemand] = useState(400);
+const SOURCES = ['solar', 'wind', 'hydro', 'coal', 'gas'];
 
-  const handleOptimize = () => {
-    onOptimize(demand);
-  };
+const formatHour = (ts: string) =>
+  new Date(ts).toLocaleString('en-ZA', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
-  const COLORS = ['#F59E0B', '#3B82F6', '#EF4444', '#8B5CF6', '#10B981'];
+const OptimizationPanel: React.FC<OptimizationPanelProps> = ({ points, onOptimize, result }) => {
+  const [demand, setDemand] = useState(600);
+  const [index, setIndex] = useState(0);
 
-  const chartData = result?.allocation ? [
-    { name: 'Solar', value: result.allocation.solar_mw },
-    { name: 'Wind', value: result.allocation.wind_mw },
-    { name: 'Coal', value: result.allocation.coal_mw },
-    { name: 'Gas', value: result.allocation.gas_mw },
-    { name: 'Hydro', value: result.allocation.hydro_mw },
-  ].filter(item => item.value > 0) : [];
+  // Default to the first forecast hour at noon
+  useEffect(() => {
+    const noon = points.findIndex((p) => new Date(p.timestamp).getHours() === 12);
+    setIndex(noon >= 0 ? noon : 0);
+  }, [points]);
+
+  const point = points[index];
 
   return (
     <div className="bg-gray-800 rounded-lg p-6">
-      <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-        <DollarSign className="text-green-400" />
-        Cost Optimization
+      <h2 className="text-xl font-semibold mb-1 flex items-center gap-2">
+        <DollarSign className="text-green-400" size={20} />
+        Least-cost dispatch for one hour
       </h2>
-      
+      <p className="text-gray-400 text-sm mb-4">
+        A linear program meets demand with forecast solar and wind first, then hydro, coal and gas.
+        Costs are illustrative placeholders, not market prices.
+      </p>
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Input Section */}
         <div>
-          <label className="block text-gray-300 mb-2">Grid Demand (MW)</label>
+          <label className="block text-gray-300 text-sm mb-1">Forecast hour</label>
+          <select
+            value={index}
+            onChange={(e) => setIndex(Number(e.target.value))}
+            className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg mb-1"
+          >
+            {points.map((p, i) => (
+              <option key={p.timestamp} value={i}>
+                {formatHour(p.timestamp)}
+              </option>
+            ))}
+          </select>
+          {point && (
+            <p className="text-gray-400 text-xs mb-4">
+              Forecast: solar {point.solar_mw.toFixed(1)} MW, wind {point.wind_mw.toFixed(1)} MW
+            </p>
+          )}
+
+          <label className="block text-gray-300 text-sm mb-1">Grid demand (MW)</label>
           <input
             type="number"
             value={demand}
             onChange={(e) => setDemand(Number(e.target.value))}
-            className="w-full bg-gray-700 text-white px-4 py-2 rounded-lg mb-4"
-            min="100"
-            max="1000"
+            className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg mb-4"
+            min="10"
+            max="1200"
             step="10"
           />
-          
+
           <button
-            onClick={handleOptimize}
-            className="w-full bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-semibold py-3 px-6 rounded-lg flex items-center justify-center gap-2 transition-all"
+            onClick={() => point && onOptimize(demand, point)}
+            disabled={!point}
+            className="w-full bg-green-700 hover:bg-green-800 disabled:opacity-50 text-white font-semibold py-2 px-6 rounded-lg flex items-center justify-center gap-2"
           >
-            <Zap size={20} />
-            Optimize Allocation
+            <Zap size={18} />
+            Run dispatch
           </button>
-
-          {result && result.status === 'optimal' && (
-            <div className="mt-6 space-y-3">
-              <div className="bg-gray-700 rounded-lg p-4">
-                <p className="text-gray-400 text-sm">Cost Reduction</p>
-                <p className="text-green-400 text-2xl font-bold">
-                  {result.cost_reduction_pct.toFixed(1)}%
-                </p>
-              </div>
-              
-              <div className="bg-gray-700 rounded-lg p-4">
-                <p className="text-gray-400 text-sm">Renewable Percentage</p>
-                <p className="text-blue-400 text-2xl font-bold">
-                  {result.renewable_percentage.toFixed(1)}%
-                </p>
-              </div>
-
-              <div className="bg-gray-700 rounded-lg p-4">
-                <p className="text-gray-400 text-sm">Total Cost</p>
-                <p className="text-white text-xl font-bold">
-                  ${result.optimized_cost.toFixed(2)}
-                </p>
-                <p className="text-gray-500 text-xs">
-                  Baseline: ${result.baseline_cost.toFixed(2)}
-                </p>
-              </div>
-            </div>
-          )}
         </div>
 
-        {/* Results Section */}
         <div>
-          {result && result.status === 'optimal' ? (
+          {result?.status === 'optimal' ? (
             <>
-              <h3 className="text-lg font-semibold mb-4">Energy Source Allocation</h3>
-              <ResponsiveContainer width="100%" height={300}>
-                <PieChart>
-                  <Pie
-                    data={chartData}
-                    cx="50%"
-                    cy="50%"
-                    labelLine={false}
-                    label={({ name, value }) => `${name}: ${value.toFixed(1)} MW`}
-                    outerRadius={80}
-                    fill="#8884d8"
-                    dataKey="value"
-                  >
-                    {chartData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: '8px' }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-
-              <div className="mt-4 space-y-2">
-                {Object.entries(result.allocation).map(([source, value]: [string, any], idx) => (
-                  value > 0 && (
-                    <div key={source} className="flex justify-between items-center bg-gray-700 rounded p-3">
-                      <span className="flex items-center gap-2">
-                        <div 
-                          className="w-3 h-3 rounded-full" 
-                          style={{ backgroundColor: COLORS[idx % COLORS.length] }}
-                        />
-                        <span className="capitalize">{source.replace('_mw', '')}</span>
-                      </span>
-                      <span className="font-semibold">{value.toFixed(1)} MW</span>
+              <div className="space-y-2 mb-4">
+                {SOURCES.map((s) => {
+                  const mw = result.allocation[`${s}_mw`] ?? 0;
+                  return (
+                    <div key={s} className="text-sm">
+                      <div className="flex justify-between text-gray-300">
+                        <span className="capitalize">{s}</span>
+                        <span>
+                          {mw.toFixed(1)} MW at ${result.assumed_costs_usd_per_mwh[s]}/MWh
+                        </span>
+                      </div>
+                      <div className="h-1.5 bg-gray-700 rounded">
+                        <div className="h-1.5 bg-green-500 rounded" style={{ width: `${(mw / result.demand_mw) * 100}%` }} />
+                      </div>
                     </div>
-                  )
-                ))}
+                  );
+                })}
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div className="bg-gray-700 rounded-lg p-3">
+                  <p className="text-gray-400">Cost this hour</p>
+                  <p className="text-white text-lg font-semibold">${result.cost_usd.toFixed(0)}</p>
+                  <p className="text-gray-400 text-xs">Without solar and wind: ${result.baseline_cost_usd.toFixed(0)}</p>
+                </div>
+                <div className="bg-gray-700 rounded-lg p-3">
+                  <p className="text-gray-400">Saving from solar and wind</p>
+                  <p className="text-white text-lg font-semibold">{result.saving_pct.toFixed(1)}%</p>
+                  <p className="text-gray-400 text-xs">Solar and wind share: {result.solar_wind_share_pct.toFixed(1)}%</p>
+                </div>
               </div>
             </>
           ) : (
-            <div className="h-full flex items-center justify-center text-gray-400">
-              <p>Run optimization to see results</p>
+            <div className="h-full flex items-center justify-center text-gray-400 text-sm">
+              <p>{result?.message ?? 'Pick an hour and run the dispatch.'}</p>
             </div>
           )}
         </div>

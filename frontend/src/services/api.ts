@@ -7,38 +7,73 @@ const api = axios.create({
   timeout: 30000,
 });
 
-export interface ForecastData {
-  location: string;
+export interface ForecastPoint {
   timestamp: string;
-  solar_forecast_mw: number;
-  wind_forecast_mw: number;
+  solar_mw: number;
+  wind_mw: number;
+}
+
+export interface ForecastResponse {
+  location: string;
+  issued_at: string;
+  weather_source: string;
+  points: ForecastPoint[];
 }
 
 export interface OptimizationResult {
   status: string;
-  allocation: {
-    solar_mw: number;
-    wind_mw: number;
-    coal_mw: number;
-    gas_mw: number;
-    hydro_mw: number;
-  };
-  optimized_cost: number;
-  baseline_cost: number;
-  cost_savings: number;
-  cost_reduction_pct: number;
-  renewable_percentage: number;
+  message?: string;
+  demand_mw: number;
+  allocation: Record<string, number>;
+  cost_usd: number;
+  baseline_cost_usd: number;
+  saving_usd: number;
+  saving_pct: number;
+  solar_wind_share_pct: number;
+  assumed_costs_usd_per_mwh: Record<string, number>;
+}
+
+export interface Score {
+  mae: number;
+  rmse: number;
+}
+
+export interface SiteScores {
+  model: Score;
+  persistence: Score;
+  seasonal_naive: Score;
+  physical_nwp: Score;
+  skill_vs: Record<string, { mae: number | null; rmse: number | null }>;
+  n_hours: number;
+}
+
+export interface TargetEvaluation {
+  overall: SiteScores;
+  by_site: Record<string, SiteScores>;
+  hours_scored: string;
 }
 
 export interface Metrics {
-  total_predictions: number;
-  avg_latency_ms: number;
-  uptime_pct: number;
-  cost_reduction_pct: number;
+  evaluation: {
+    split: Record<string, [string, string, number]>;
+    targets: Record<'solar' | 'wind', TargetEvaluation>;
+  } | null;
+  api: {
+    since: string;
+    forecast_requests: number;
+    median_forecast_ms: number | null;
+    last_forecast_ms: number | null;
+  };
 }
 
-export const fetchForecast = async (location: string, days: number = 7): Promise<ForecastData[]> => {
-  const response = await api.post<ForecastData[]>('/forecast', { location, days });
+export interface Location {
+  lat: number;
+  lon: number;
+  name: string;
+}
+
+export const fetchForecast = async (location: string, days = 7): Promise<ForecastResponse> => {
+  const response = await api.post<ForecastResponse>('/forecast', { location, days });
   return response.data;
 };
 
@@ -60,12 +95,7 @@ export const fetchMetrics = async (): Promise<Metrics> => {
   return response.data;
 };
 
-export const fetchLocations = async () => {
+export const fetchLocations = async (): Promise<Record<string, Location>> => {
   const response = await api.get('/locations');
-  return response.data;
-};
-
-export const healthCheck = async () => {
-  const response = await api.get('/health');
-  return response.data;
+  return response.data.details;
 };
