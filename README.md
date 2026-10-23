@@ -52,6 +52,8 @@ All numbers come from `python run_training.py` and are saved in [docs/metrics.js
 
 My first run used Open-Meteo's default `best_match` forecast source. The model then lost to the physical baseline (wind MAE 7.49 vs 5.50). In every test month the model over-forecast wind by 0.4 to 5.6 MW on average, while the physical model stayed within 1.8 MW. The likely cause: Open-Meteo's archive of the newer 9 km ECMWF model starts in autumn 2025, and after that the `best_match` wind forecasts were less biased against ERA5 than in the training period. The model kept correcting a bias that had shrunk. Pinning one model (ECMWF IFS 0.25°) for training, testing and the live forecast fixed it.
 
+I made that change after seeing the test-year result, so the test scores above may be a little optimistic. A cleaner check would choose the weather source on a validation period before the test year.
+
 ### Speed
 
 In one local run the first forecast request took 8.7 s (cold start). Later 7-day requests took about 0.28 s, nearly all of it the call to Open-Meteo; the two model predictions took under 20 ms. The dashboard shows the request times the running API has measured, not fixed numbers.
