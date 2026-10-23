@@ -7,108 +7,106 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
-MODELS_DIR = DATA_DIR / "models"
+MODELS_DIR = Path(os.getenv("MODELS_DIR", str(DATA_DIR / "models")))
+DOCS_DIR = BASE_DIR / "docs"
 
 # Create directories if they don't exist
 for dir_path in [DATA_DIR, RAW_DATA_DIR, PROCESSED_DATA_DIR, MODELS_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
-# Database configuration
-DATABASE_URL = f"sqlite:///{DATA_DIR / 'energy_forecast.db'}"
+# Open-Meteo APIs (free, no API key). Data licence: CC BY 4.0.
+OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+OPEN_METEO_PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+TIMEZONE = "Africa/Johannesburg"
 
-# API Configuration
-API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", 8000))
-API_RELOAD = os.getenv("API_RELOAD", "true").lower() == "true"
+# Pin the weather models. Open-Meteo's default "best_match" switched to a
+# newer ECMWF model in late 2025, which changed the forecast bias between
+# the training and test periods. One fixed model for training and serving
+# avoids that.
+REANALYSIS_MODEL = "era5"
+FORECAST_MODEL = "ecmwf_ifs025"
 
-# Open-Meteo API Configuration (Free, no API key required)
-OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1"
-OPEN_METEO_ARCHIVE_URL = f"{OPEN_METEO_BASE_URL}/archive"
-OPEN_METEO_FORECAST_URL = f"{OPEN_METEO_BASE_URL}/forecast"
-
-# South African Locations (Lat, Lon)
-LOCATIONS: Dict[str, Dict[str, float]] = {
-    "pretoria": {"lat": -25.7479, "lon": 28.2293, "name": "Pretoria"},
-    "cape_town": {"lat": -33.9249, "lon": 18.4241, "name": "Cape Town"},
-    "johannesburg": {"lat": -26.2041, "lon": 28.0473, "name": "Johannesburg"},
-    "durban": {"lat": -29.8587, "lon": 31.0218, "name": "Durban"},
-    "port_elizabeth": {"lat": -33.9608, "lon": 25.6022, "name": "Port Elizabeth"}
+# South African sites. Each one gets a hypothetical 100 MW PV plant and a
+# 100 MW wind farm whose output is modelled from weather data.
+LOCATIONS: Dict[str, Dict] = {
+    "pretoria": {"lat": -25.7479, "lon": 28.2293, "name": "Pretoria, Gauteng"},
+    "de_aar": {"lat": -30.65, "lon": 24.01, "name": "De Aar, Northern Cape"},
+    "jeffreys_bay": {"lat": -34.03, "lon": 24.91, "name": "Jeffreys Bay, Eastern Cape"},
 }
 
-# Weather parameters for Open-Meteo
+# Hourly weather variables. The same names are used for the reanalysis
+# ("actual" weather), the archived day-ahead forecasts and the live forecast.
 WEATHER_PARAMS: List[str] = [
-    "temperature_2m",
-    "relativehumidity_2m",
-    "windspeed_10m",
-    "winddirection_10m",
     "shortwave_radiation",
-    "direct_radiation",
+    "direct_normal_irradiance",
     "diffuse_radiation",
-    "cloudcover"
+    "temperature_2m",
+    "cloud_cover",
+    "wind_speed_10m",
+    "wind_speed_100m",
+    "wind_direction_100m",
 ]
 
-# Historical data range
-HISTORICAL_START_DATE = "2019-01-01"
-HISTORICAL_END_DATE = "2024-12-31"
+# Day-ahead forecasts of 100 m wind are archived from about April 2024
+HISTORY_START_DATE = "2024-04-01"
+HISTORY_END_DATE = "2026-09-30"
 
-# Forecast configuration
-FORECAST_HOURS = 168  # 7 days
-UPDATE_INTERVAL_MINUTES = 30
+# Time-based split: train, then a validation window for early stopping,
+# then a full held-out year for testing
+VALIDATION_START = "2025-07-01"
+TEST_START = "2025-10-01"
 
-# Model configuration
+# Plant assumptions used by the physical power models
+PLANT = {
+    "pv_ac_capacity_mw": 100.0,
+    "pv_dc_ac_ratio": 1.2,
+    "pv_gamma_pdc": -0.004,  # power change per degree C of cell temperature
+    "pv_system_losses": 0.14,  # PVWatts default losses
+    "pv_inverter_efficiency": 0.96,
+    "wind_capacity_mw": 100.0,
+    "wind_cut_in_ms": 3.0,
+    "wind_rated_ms": 12.0,
+    "wind_cut_out_ms": 25.0,
+    "wind_farm_losses": 0.10,  # wake and availability losses
+}
+
 RANDOM_STATE = 42
-TEST_SIZE = 0.2
-VALIDATION_SIZE = 0.1
 
-# XGBoost parameters
+# XGBoost parameters (small enough to train in seconds on 2 cores)
 XGBOOST_PARAMS = {
-    "n_estimators": 200,
-    "max_depth": 8,
+    "n_estimators": 1000,
+    "max_depth": 6,
     "learning_rate": 0.05,
     "subsample": 0.8,
     "colsample_bytree": 0.8,
+    "min_child_weight": 5,
+    "early_stopping_rounds": 50,
     "random_state": RANDOM_STATE,
-    "n_jobs": -1
+    "n_jobs": int(os.getenv("N_JOBS", "2")),
 }
 
-# LSTM parameters
-LSTM_PARAMS = {
-    "sequence_length": 24,  # 24 hours lookback
-    "units": 128,
-    "dropout": 0.2,
-    "epochs": 50,
-    "batch_size": 32
-}
-
-# Feature engineering
-FEATURE_LAG_HOURS = [1, 3, 6, 12, 24, 48, 72]
-ROLLING_WINDOW_HOURS = [6, 12, 24]
-
-# Cost optimization ($/kWh)
+# Illustrative marginal costs in USD/MWh for the dispatch demo.
+# These are placeholders, not market data.
 ENERGY_COSTS = {
-    "solar": 0.05,
-    "wind": 0.05,
-    "coal": 0.15,
-    "gas": 0.12,
-    "hydro": 0.08
+    "solar": 5.0,
+    "wind": 5.0,
+    "hydro": 40.0,
+    "coal": 60.0,
+    "gas": 150.0,
+}
+CAPACITIES_MW = {
+    "hydro": 200.0,
+    "coal": 500.0,
+    "gas": 300.0,
 }
 
-# Performance targets
-TARGET_ACCURACY = 0.88
-TARGET_LATENCY_MS = 300
-TARGET_UPTIME = 0.995
-TARGET_COST_REDUCTION = 0.35
-
-# Monitoring and logging
+# Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = DATA_DIR / "logs" / "app.log"
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-# Airflow configuration
-AIRFLOW_HOME = os.getenv("AIRFLOW_HOME", str(BASE_DIR / "backend" / "airflow"))
-AIRFLOW_DAGS_FOLDER = os.path.join(AIRFLOW_HOME, "dags")
-
-# Error handling
+# HTTP
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = 120

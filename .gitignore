@@ -1,80 +1,39 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
 venv/
+.venv/
 env/
-ENV/
-*.egg-info/
-dist/
-build/
 .pytest_cache/
 .coverage
 htmlcov/
+*.egg-info/
+
+# Downloaded data, built datasets, trained models and logs
+# (recreate with run_initialization.py and run_training.py)
+data/raw/
+data/processed/
+data/models/
+data/logs/
 *.log
 
-# Jupyter Notebooks
-.ipynb_checkpoints/
-*.ipynb
-
-# Data files (keep structure, ignore large files)
-data/raw/*.csv
-data/raw/*.xlsx
-data/processed/*.csv
-data/models/*.joblib
-data/models/*.h5
-data/models/*.pkl
-data/logs/*.log
-
-# Keep directory structure with .gitkeep
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!data/models/.gitkeep
-!data/logs/.gitkeep
-
-# Airflow
-backend/airflow/airflow.db
-backend/airflow/airflow.cfg
-backend/airflow/logs/
-backend/airflow/webserver_config.py
-backend/airflow/*.pid
-
-# Node
+# Node / frontend build
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# Frontend build
 frontend/dist/
-frontend/build/
 .vite/
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
 
 # Environment files
 .env
 .env.local
 .env.*.local
 
-# OS
+# IDEs and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
 Thumbs.db
-
-# SQLite databases
-*.db
-*.sqlite
-*.sqlite3
 
 # Temporary files
 *.tmp
-*.temp
 .cache/

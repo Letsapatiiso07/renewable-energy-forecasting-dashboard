@@ -1,258 +1,135 @@
-import requests
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-import time
+"""
+Fetch hourly weather from Open-Meteo (free, no API key, CC BY 4.0).
 
-# Use absolute imports instead of relative
+Three sources, all with the same variable names:
+- reanalysis: Historical Weather API, ERA5. Stands in for the weather that
+  actually happened and drives the modelled "actual" output.
+- day-ahead: Previous Runs API, ECMWF IFS 0.25 "_previous_day1" values, i.e.
+  the forecast made 24 hours before each hour. These are the model inputs for
+  training and testing, so the model only sees what a forecaster would have had.
+- live: Forecast API, same ECMWF IFS 0.25 model, next 1 to 7 days.
+"""
+import time
+from datetime import date, timedelta
+from typing import Iterator, Optional, Tuple
+
+import pandas as pd
+import requests
+
 from utils.config import (
-    OPEN_METEO_ARCHIVE_URL, OPEN_METEO_FORECAST_URL,
-    WEATHER_PARAMS, LOCATIONS, RAW_DATA_DIR,
+    OPEN_METEO_ARCHIVE_URL, OPEN_METEO_PREVIOUS_RUNS_URL, OPEN_METEO_FORECAST_URL,
+    WEATHER_PARAMS, LOCATIONS, RAW_DATA_DIR, TIMEZONE, REANALYSIS_MODEL, FORECAST_MODEL,
     MAX_RETRIES, RETRY_DELAY_SECONDS, REQUEST_TIMEOUT,
-    HISTORICAL_START_DATE, HISTORICAL_END_DATE
 )
-from utils.logger import setup_logger, log_performance
+from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+DAY_AHEAD_SUFFIX = "_previous_day1"
+
+
+def month_chunks(start: str, end: str, months: int) -> Iterator[Tuple[str, str]]:
+    """Split [start, end] into ranges of a few months; long requests time out"""
+    current = date.fromisoformat(start)
+    last = date.fromisoformat(end)
+    while current <= last:
+        month = current.month - 1 + months
+        next_start = date(current.year + month // 12, month % 12 + 1, 1)
+        chunk_end = min(next_start - timedelta(days=1), last)
+        yield current.isoformat(), chunk_end.isoformat()
+        current = next_start
+
 
 class WeatherDataIngestion:
-    """Fetch weather data from Open-Meteo API"""
-    
+    """Fetch weather data from Open-Meteo"""
+
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "RenewableEnergyDashboard/1.0"})
-    
+        self.session.headers.update({"User-Agent": "renewable-energy-forecasting-dashboard"})
+
     def _make_request(self, url: str, params: dict) -> Optional[dict]:
-        """Make HTTP request with retry logic"""
+        """GET with retries; returns parsed JSON or None"""
         for attempt in range(MAX_RETRIES):
             try:
-                start_time = time.time()
                 response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
-                duration_ms = (time.time() - start_time) * 1000
-                
                 response.raise_for_status()
-                log_performance(logger, "API_REQUEST", duration_ms, success=True, 
-                              metadata={"url": url, "attempt": attempt + 1})
                 return response.json()
-                
             except requests.exceptions.RequestException as e:
                 logger.warning(f"Request attempt {attempt + 1} failed: {e}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
-                else:
-                    logger.error(f"All retry attempts failed for {url}")
-                    return None
-        
+        logger.error(f"All retry attempts failed for {url}")
         return None
-    
-    def fetch_historical_weather(self, location_key: str, 
-                                 start_date: str = HISTORICAL_START_DATE,
-                                 end_date: str = HISTORICAL_END_DATE) -> Optional[pd.DataFrame]:
-        """
-        Fetch historical weather data for a location
-        
-        Args:
-            location_key: Key from LOCATIONS dict
-            start_date: Start date (YYYY-MM-DD)
-            end_date: End date (YYYY-MM-DD)
-            
-        Returns:
-            DataFrame with weather data or None if failed
-        """
-        if location_key not in LOCATIONS:
-            logger.error(f"Invalid location: {location_key}")
-            return None
-        
+
+    def _hourly_frame(self, url: str, location_key: str, suffix: str = "",
+                      **extra) -> Optional[pd.DataFrame]:
         location = LOCATIONS[location_key]
         params = {
             "latitude": location["lat"],
             "longitude": location["lon"],
-            "start_date": start_date,
-            "end_date": end_date,
-            "hourly": ",".join(WEATHER_PARAMS),
-            "timezone": "Africa/Johannesburg"
+            "hourly": ",".join(p + suffix for p in WEATHER_PARAMS),
+            "wind_speed_unit": "ms",
+            "timezone": TIMEZONE,
+            **extra,
         }
-        
-        logger.info(f"Fetching historical weather for {location['name']}")
-        data = self._make_request(OPEN_METEO_ARCHIVE_URL, params)
-        
+        data = self._make_request(url, params)
         if not data or "hourly" not in data:
-            logger.error(f"Failed to fetch historical data for {location_key}")
             return None
-        
         df = pd.DataFrame(data["hourly"])
-        df["location"] = location_key
-        df["location_name"] = location["name"]
+        df = df.rename(columns={p + suffix: p for p in WEATHER_PARAMS})
         df["time"] = pd.to_datetime(df["time"])
-        
-        logger.info(f"Fetched {len(df)} historical records for {location['name']}")
+        df["location"] = location_key
         return df
-    
-    def fetch_forecast_weather(self, location_key: str, 
-                               forecast_days: int = 7) -> Optional[pd.DataFrame]:
-        """
-        Fetch weather forecast data
-        
-        Args:
-            location_key: Key from LOCATIONS dict
-            forecast_days: Number of days to forecast
-            
-        Returns:
-            DataFrame with forecast data or None if failed
-        """
+
+    def _fetch_range(self, url: str, location_key: str, start: str, end: str,
+                     months: int, suffix: str = "", **extra) -> Optional[pd.DataFrame]:
+        parts = []
+        for chunk_start, chunk_end in month_chunks(start, end, months):
+            df = self._hourly_frame(url, location_key, suffix,
+                                    start_date=chunk_start, end_date=chunk_end, **extra)
+            if df is None:
+                logger.error(f"Failed to fetch {location_key} {chunk_start}..{chunk_end}")
+                return None
+            parts.append(df)
+            time.sleep(1)  # be polite to the free API
+        return pd.concat(parts, ignore_index=True)
+
+    def fetch_reanalysis(self, location_key: str, start: str, end: str) -> Optional[pd.DataFrame]:
+        """Hourly ERA5 reanalysis weather (Historical Weather API)"""
+        logger.info(f"Fetching reanalysis weather for {location_key} {start}..{end}")
+        return self._fetch_range(OPEN_METEO_ARCHIVE_URL, location_key, start, end, months=6,
+                                 models=REANALYSIS_MODEL)
+
+    def fetch_day_ahead(self, location_key: str, start: str, end: str) -> Optional[pd.DataFrame]:
+        """Hourly forecasts issued 24 h before each hour (Previous Runs API)"""
+        logger.info(f"Fetching archived day-ahead forecasts for {location_key} {start}..{end}")
+        return self._fetch_range(OPEN_METEO_PREVIOUS_RUNS_URL, location_key, start, end,
+                                 months=3, suffix=DAY_AHEAD_SUFFIX, models=FORECAST_MODEL)
+
+    def fetch_forecast_weather(self, location_key: str, forecast_days: int = 7) -> Optional[pd.DataFrame]:
+        """Live hourly forecast for the next `forecast_days` days"""
         if location_key not in LOCATIONS:
             logger.error(f"Invalid location: {location_key}")
             return None
-        
-        location = LOCATIONS[location_key]
-        params = {
-            "latitude": location["lat"],
-            "longitude": location["lon"],
-            "hourly": ",".join(WEATHER_PARAMS),
-            "forecast_days": forecast_days,
-            "timezone": "Africa/Johannesburg"
-        }
-        
-        logger.info(f"Fetching forecast weather for {location['name']}")
-        data = self._make_request(OPEN_METEO_FORECAST_URL, params)
-        
-        if not data or "hourly" not in data:
-            logger.error(f"Failed to fetch forecast data for {location_key}")
-            return None
-        
-        df = pd.DataFrame(data["hourly"])
-        df["location"] = location_key
-        df["location_name"] = location["name"]
-        df["time"] = pd.to_datetime(df["time"])
-        
-        logger.info(f"Fetched {len(df)} forecast records for {location['name']}")
-        return df
-    
-    def fetch_all_locations_historical(self) -> pd.DataFrame:
-        """Fetch historical data for all configured locations"""
-        all_data = []
-        
-        for location_key in LOCATIONS.keys():
-            df = self.fetch_historical_weather(location_key)
-            if df is not None:
-                all_data.append(df)
-                time.sleep(1)  # Rate limiting courtesy
-        
-        if not all_data:
-            logger.error("No historical data fetched for any location")
-            return pd.DataFrame()
-        
-        combined_df = pd.concat(all_data, ignore_index=True)
-        logger.info(f"Total historical records: {len(combined_df)}")
-        return combined_df
-    
-    def save_to_csv(self, df: pd.DataFrame, filename: str):
-        """Save DataFrame to CSV in raw data directory"""
-        filepath = RAW_DATA_DIR / filename
-        df.to_csv(filepath, index=False)
-        logger.info(f"Saved data to {filepath}")
+        return self._hourly_frame(OPEN_METEO_FORECAST_URL, location_key,
+                                  forecast_days=forecast_days, models=FORECAST_MODEL)
 
-
-class EnergyDataGenerator:
-    """Generate synthetic energy output data based on weather"""
-    
-    @staticmethod
-    def calculate_solar_output(radiation: float, temperature: float, 
-                               cloudcover: float, capacity_mw: float = 100) -> float:
-        """
-        Calculate solar PV output based on weather conditions
-        
-        Args:
-            radiation: Solar radiation (W/m²)
-            temperature: Temperature (°C)
-            cloudcover: Cloud cover (%)
-            capacity_mw: Installed capacity in MW
-            
-        Returns:
-            Solar output in MW
-        """
-        if pd.isna(radiation) or radiation <= 0:
-            return 0.0
-        
-        # Temperature coefficient (efficiency decreases with heat)
-        temp_coeff = max(0, 1 - (temperature - 25) * 0.004)
-        
-        # Cloud cover impact
-        cloud_factor = 1 - (cloudcover / 100) * 0.7
-        
-        # Standard test conditions: 1000 W/m² at 25°C
-        efficiency = 0.18  # Typical PV efficiency
-        output = (radiation / 1000) * capacity_mw * efficiency * temp_coeff * cloud_factor
-        
-        return max(0, min(output, capacity_mw))
-    
-    @staticmethod
-    def calculate_wind_output(windspeed: float, capacity_mw: float = 100) -> float:
-        """
-        Calculate wind turbine output based on wind speed
-        
-        Args:
-            windspeed: Wind speed (m/s)
-            capacity_mw: Installed capacity in MW
-            
-        Returns:
-            Wind output in MW
-        """
-        if pd.isna(windspeed) or windspeed <= 0:
-            return 0.0
-        
-        # Typical wind turbine power curve
-        cut_in_speed = 3.0  # m/s
-        rated_speed = 12.0  # m/s
-        cut_out_speed = 25.0  # m/s
-        
-        if windspeed < cut_in_speed or windspeed > cut_out_speed:
-            return 0.0
-        elif windspeed >= rated_speed:
-            return capacity_mw
-        else:
-            # Cubic relationship between cut-in and rated speed
-            power_coefficient = ((windspeed - cut_in_speed) / (rated_speed - cut_in_speed)) ** 3
-            return capacity_mw * power_coefficient
-    
-    def generate_energy_data(self, weather_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Generate synthetic energy output from weather data
-        
-        Args:
-            weather_df: DataFrame with weather data
-            
-        Returns:
-            DataFrame with added energy output columns
-        """
-        df = weather_df.copy()
-        
-        # Calculate solar output
-        df["solar_output_mw"] = df.apply(
-            lambda row: self.calculate_solar_output(
-                row.get("shortwave_radiation", 0),
-                row.get("temperature_2m", 25),
-                row.get("cloudcover", 0)
-            ),
-            axis=1
-        )
-        
-        # Calculate wind output
-        df["wind_output_mw"] = df.apply(
-            lambda row: self.calculate_wind_output(row.get("windspeed_10m", 0)),
-            axis=1
-        )
-        
-        # Add realistic noise
-        np.random.seed(42)
-        df["solar_output_mw"] *= np.random.normal(1, 0.05, len(df))
-        df["wind_output_mw"] *= np.random.normal(1, 0.08, len(df))
-        
-        # Ensure non-negative
-        df["solar_output_mw"] = df["solar_output_mw"].clip(lower=0)
-        df["wind_output_mw"] = df["wind_output_mw"].clip(lower=0)
-        
-        logger.info(f"Generated energy data for {len(df)} records")
-        return df
+    def fetch_history(self, location_key: str, start: str, end: str,
+                      refresh: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Reanalysis and day-ahead frames for one site, cached as CSV in data/raw"""
+        frames = []
+        sources = (("reanalysis", REANALYSIS_MODEL, self.fetch_reanalysis),
+                   ("dayahead", FORECAST_MODEL, self.fetch_day_ahead))
+        for kind, model, fetch in sources:
+            path = RAW_DATA_DIR / f"{location_key}_{kind}_{model}_{start}_{end}.csv"
+            if path.exists() and not refresh:
+                df = pd.read_csv(path, parse_dates=["time"])
+                logger.info(f"Loaded cached {path.name} ({len(df)} rows)")
+            else:
+                df = fetch(location_key, start, end)
+                if df is None:
+                    raise RuntimeError(f"Could not fetch {kind} data for {location_key}")
+                df.to_csv(path, index=False)
+                logger.info(f"Saved {path.name} ({len(df)} rows)")
+            frames.append(df)
+        return frames[0], frames[1]

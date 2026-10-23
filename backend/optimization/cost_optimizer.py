@@ -1,157 +1,69 @@
 """
-Cost optimization using linear programming
-"""
-import pulp
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Tuple
-from datetime import datetime
+One-hour least-cost dispatch with linear programming (PuLP + CBC).
 
-from utils.config import ENERGY_COSTS, TARGET_COST_REDUCTION
+Costs and capacities are illustrative placeholders from utils.config, not
+market data. The saving is measured against the same dispatch with no solar
+or wind, so it shows what the forecast renewable output is worth under
+those assumptions.
+"""
+from typing import Dict, Optional
+
+import pulp
+
+from utils.config import CAPACITIES_MW, ENERGY_COSTS
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 
 class GridCostOptimizer:
-    """Optimize energy grid costs using linear programming"""
-    
-    def __init__(self):
-        self.costs = ENERGY_COSTS
-        self.problem = None
-        self.solution = {}
-    
-    def optimize_allocation(
-        self,
-        demand_mw: float,
-        solar_available: float,
-        wind_available: float,
-        coal_capacity: float = 500,
-        gas_capacity: float = 300,
-        hydro_capacity: float = 200
-    ) -> Dict:
-        """
-        Optimize energy source allocation to minimize costs
-        
-        Args:
-            demand_mw: Total demand in MW
-            solar_available: Available solar output in MW
-            wind_available: Available wind output in MW
-            coal_capacity: Coal capacity in MW
-            gas_capacity: Gas capacity in MW
-            hydro_capacity: Hydro capacity in MW
-            
-        Returns:
-            Optimization results with allocation and costs
-        """
-        # Create optimization problem
-        prob = pulp.LpProblem("Energy_Cost_Optimization", pulp.LpMinimize)
-        
-        # Decision variables (how much to use from each source)
-        solar_use = pulp.LpVariable("solar", lowBound=0, upBound=solar_available)
-        wind_use = pulp.LpVariable("wind", lowBound=0, upBound=wind_available)
-        coal_use = pulp.LpVariable("coal", lowBound=0, upBound=coal_capacity)
-        gas_use = pulp.LpVariable("gas", lowBound=0, upBound=gas_capacity)
-        hydro_use = pulp.LpVariable("hydro", lowBound=0, upBound=hydro_capacity)
-        
-        # Objective: Minimize cost
-        prob += (
-            solar_use * self.costs["solar"] +
-            wind_use * self.costs["wind"] +
-            coal_use * self.costs["coal"] +
-            gas_use * self.costs["gas"] +
-            hydro_use * self.costs["hydro"],
-            "Total_Cost"
-        )
-        
-        # Constraint: Meet demand
-        prob += (
-            solar_use + wind_use + coal_use + gas_use + hydro_use >= demand_mw,
-            "Meet_Demand"
-        )
-        
-        # Solve
+    """Least-cost dispatch of solar, wind, hydro, coal and gas for one hour"""
+
+    def __init__(self, costs: Optional[Dict[str, float]] = None,
+                 capacities: Optional[Dict[str, float]] = None):
+        self.costs = costs or ENERGY_COSTS
+        self.capacities = capacities or CAPACITIES_MW
+
+    def _solve(self, demand_mw: float, limits: Dict[str, float]) -> Optional[Dict[str, float]]:
+        prob = pulp.LpProblem("dispatch", pulp.LpMinimize)
+        use = {s: pulp.LpVariable(s, lowBound=0, upBound=cap) for s, cap in limits.items()}
+        prob += pulp.lpSum(use[s] * self.costs[s] for s in use)
+        prob += pulp.lpSum(use.values()) == demand_mw
         prob.solve(pulp.PULP_CBC_CMD(msg=0))
-        
-        # Extract solution
-        if pulp.LpStatus[prob.status] == "Optimal":
-            allocation = {
-                "solar_mw": pulp.value(solar_use),
-                "wind_mw": pulp.value(wind_use),
-                "coal_mw": pulp.value(coal_use),
-                "gas_mw": pulp.value(gas_use),
-                "hydro_mw": pulp.value(hydro_use)
+        if pulp.LpStatus[prob.status] != "Optimal":
+            return None
+        return {s: float(v.value()) for s, v in use.items()}
+
+    def _cost(self, allocation: Dict[str, float]) -> float:
+        return sum(mw * self.costs[s] for s, mw in allocation.items())
+
+    def optimize_allocation(self, demand_mw: float, solar_available: float,
+                            wind_available: float) -> Dict:
+        """Cheapest way to meet `demand_mw` for one hour. Costs are USD/MWh."""
+        limits = {"solar": max(solar_available, 0.0), "wind": max(wind_available, 0.0),
+                  **self.capacities}
+        allocation = self._solve(demand_mw, limits)
+        baseline = self._solve(demand_mw, {**limits, "solar": 0.0, "wind": 0.0})
+        if allocation is None or baseline is None:
+            total = sum(limits.values())
+            logger.warning(f"No feasible dispatch for {demand_mw} MW (capacity {total:.0f} MW)")
+            return {
+                "status": "infeasible",
+                "message": f"Demand {demand_mw:.0f} MW is above available capacity "
+                           f"({total:.0f} MW with renewables, "
+                           f"{total - limits['solar'] - limits['wind']:.0f} MW without)",
             }
-            
-            # Calculate costs
-            optimized_cost = pulp.value(prob.objective)
-            
-            # Baseline cost (using coal for everything)
-            baseline_cost = demand_mw * self.costs["coal"]
-            
-            cost_savings = baseline_cost - optimized_cost
-            cost_reduction_pct = (cost_savings / baseline_cost) * 100
-            
-            result = {
-                "status": "optimal",
-                "allocation": allocation,
-                "optimized_cost": optimized_cost,
-                "baseline_cost": baseline_cost,
-                "cost_savings": cost_savings,
-                "cost_reduction_pct": cost_reduction_pct,
-                "renewable_percentage": (
-                    (allocation["solar_mw"] + allocation["wind_mw"] + allocation["hydro_mw"]) 
-                    / demand_mw * 100
-                ),
-                "demand_mw": demand_mw
-            }
-            
-            logger.info(
-                f"Optimization: {cost_reduction_pct:.1f}% cost reduction, "
-                f"{result['renewable_percentage']:.1f}% renewable"
-            )
-            
-            return result
-        else:
-            logger.error(f"Optimization failed: {pulp.LpStatus[prob.status]}")
-            return {"status": "failed", "message": pulp.LpStatus[prob.status]}
-    
-    def optimize_batch(
-        self,
-        forecasts_df: pd.DataFrame,
-        demand_df: pd.DataFrame
-    ) -> pd.DataFrame:
-        """
-        Optimize allocation for multiple time periods
-        
-        Args:
-            forecasts_df: DataFrame with solar/wind forecasts
-            demand_df: DataFrame with demand forecasts
-            
-        Returns:
-            DataFrame with optimization results
-        """
-        results = []
-        
-        for idx, row in forecasts_df.iterrows():
-            demand = demand_df.loc[idx, "demand_mw"] if idx in demand_df.index else 400
-            
-            opt_result = self.optimize_allocation(
-                demand_mw=demand,
-                solar_available=row.get("solar_forecast_mw", 0),
-                wind_available=row.get("wind_forecast_mw", 0)
-            )
-            
-            if opt_result["status"] == "optimal":
-                result_row = {
-                    "time": row.get("time"),
-                    "location": row.get("location"),
-                    **opt_result["allocation"],
-                    "optimized_cost": opt_result["optimized_cost"],
-                    "cost_savings": opt_result["cost_savings"],
-                    "cost_reduction_pct": opt_result["cost_reduction_pct"],
-                    "renewable_pct": opt_result["renewable_percentage"]
-                }
-                results.append(result_row)
-        
-        return pd.DataFrame(results)
+
+        cost = self._cost(allocation)
+        baseline_cost = self._cost(baseline)
+        return {
+            "status": "optimal",
+            "demand_mw": demand_mw,
+            "allocation": {f"{s}_mw": mw for s, mw in allocation.items()},
+            "cost_usd": cost,
+            "baseline_cost_usd": baseline_cost,
+            "saving_usd": baseline_cost - cost,
+            "saving_pct": (baseline_cost - cost) / baseline_cost * 100 if baseline_cost else 0.0,
+            "solar_wind_share_pct": (allocation["solar"] + allocation["wind"]) / demand_mw * 100,
+            "assumed_costs_usd_per_mwh": self.costs,
+        }

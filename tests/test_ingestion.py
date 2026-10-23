@@ -1,58 +1,63 @@
 """
-Tests for data ingestion module
+Tests for data download helpers, physical power models and baselines
 """
-import pytest
+import numpy as np
 import pandas as pd
-from backend.data_processing.ingestion import WeatherDataIngestion, EnergyDataGenerator
 
-def test_weather_ingestion_initialization():
-    """Test WeatherDataIngestion initialization"""
-    ingestion = WeatherDataIngestion()
-    assert ingestion.session is not None
+from data_processing.ingestion import WeatherDataIngestion, month_chunks
+from data_processing.power_model import pv_output_mw, wind_output_mw
+from ml.baselines import persistence, seasonal_naive
+from utils.config import PLANT
 
-def test_energy_data_generator():
-    """Test EnergyDataGenerator calculations"""
-    generator = EnergyDataGenerator()
-    
-    # Test solar output calculation
-    solar_output = generator.calculate_solar_output(
-        radiation=800,  # W/m²
-        temperature=25,  # °C
-        cloudcover=20,  # %
-        capacity_mw=100
-    )
-    assert 0 <= solar_output <= 100
-    assert solar_output > 0  # Should produce some output
-    
-    # Test wind output calculation
-    wind_output = generator.calculate_wind_output(
-        windspeed=10,  # m/s
-        capacity_mw=100
-    )
-    assert 0 <= wind_output <= 100
-    assert wind_output > 0  # Should produce output at 10 m/s
 
-def test_solar_output_edge_cases():
-    """Test solar output edge cases"""
-    generator = EnergyDataGenerator()
-    
-    # No radiation
-    assert generator.calculate_solar_output(0, 25, 0) == 0
-    
-    # High cloud cover
-    output_cloudy = generator.calculate_solar_output(1000, 25, 90)
-    output_clear = generator.calculate_solar_output(1000, 25, 10)
-    assert output_cloudy < output_clear
+def test_month_chunks_cover_range_without_overlap():
+    chunks = list(month_chunks("2024-04-01", "2025-02-10", 3))
+    assert chunks[0][0] == "2024-04-01"
+    assert chunks[-1][1] == "2025-02-10"
+    for (_, end), (start, _) in zip(chunks, chunks[1:]):
+        assert pd.Timestamp(start) - pd.Timestamp(end) == pd.Timedelta(days=1)
 
-def test_wind_output_power_curve():
-    """Test wind turbine power curve"""
-    generator = EnergyDataGenerator()
-    
-    # Below cut-in speed
-    assert generator.calculate_wind_output(2, 100) == 0
-    
-    # At rated speed
-    assert generator.calculate_wind_output(12, 100) == 100
-    
-    # Above cut-out speed
-    assert generator.calculate_wind_output(30, 100) == 0
+
+def test_invalid_location_returns_none():
+    assert WeatherDataIngestion().fetch_forecast_weather("atlantis") is None
+
+
+def test_pv_output_zero_at_night_and_within_capacity(weather):
+    out = pv_output_mw(weather, -30.65, 24.01)
+    night = weather["shortwave_radiation"] == 0
+    assert np.all(out[night.to_numpy()] == 0)
+    assert out.max() > 0
+    assert out.max() <= PLANT["pv_ac_capacity_mw"]
+
+
+def test_pv_output_drops_under_cloud(weather):
+    noon = weather[weather["time"].dt.hour == 12].head(1)
+    clear = noon.assign(shortwave_radiation=1000.0, direct_normal_irradiance=900.0, diffuse_radiation=100.0)
+    cloudy = noon.assign(shortwave_radiation=300.0, direct_normal_irradiance=0.0, diffuse_radiation=300.0)
+    assert pv_output_mw(cloudy, -30.65, 24.01)[0] < pv_output_mw(clear, -30.65, 24.01)[0]
+
+
+def test_wind_power_curve():
+    rated = PLANT["wind_capacity_mw"] * (1 - PLANT["wind_farm_losses"])
+    out = wind_output_mw([2.0, 3.0, 8.0, 12.0, 20.0, 26.0])
+    assert out[0] == 0 and out[1] == 0
+    assert 0 < out[2] < rated
+    assert out[3] == rated and out[4] == rated
+    assert out[5] == 0
+    speeds = np.linspace(3, 12, 50)
+    assert np.all(np.diff(wind_output_mw(speeds)) >= 0)
+
+
+def test_baselines_use_only_the_past():
+    time = pd.date_range("2025-01-01", periods=72, freq="h")
+    actual = pd.DataFrame({"time": time, "y": np.arange(72, dtype=float)})
+
+    naive = seasonal_naive(actual, "y")
+    assert naive.iloc[:24].isna().all()
+    assert (naive.iloc[24:].to_numpy() == np.arange(48)).all()
+
+    pers = persistence(actual, "y")
+    assert pers.iloc[:24].isna().all()
+    # every hour of day 2 gets 23:00 of day 1; day 3 gets 23:00 of day 2
+    assert (pers.iloc[24:48] == 23).all()
+    assert (pers.iloc[48:72] == 47).all()
