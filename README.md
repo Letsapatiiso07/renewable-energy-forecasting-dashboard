@@ -1,459 +1,137 @@
-# 🌍⚡ Renewable Energy Forecasting Dashboard for Africa
+# Renewable Energy Forecasting Dashboard
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![React 18](https://img.shields.io/badge/react-18.2-blue.svg)](https://reactjs.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104-green.svg)](https://fastapi.tiangolo.com/)
-[![XGBoost](https://img.shields.io/badge/XGBoost-2.0-orange.svg)](https://xgboost.ai/)
+Day-ahead forecasts of solar and wind output for three South African sites (Pretoria, De Aar and Jeffreys Bay), served by a FastAPI backend and shown on a React dashboard with a small least-cost dispatch demo. It is a portfolio project for people who want to see a forecasting pipeline evaluated honestly: time-based split, naive baselines and a physical-model baseline.
 
-> **A production-ready AI-powered system for predicting solar and wind energy output with cost optimization, specifically designed for African energy grids.**
+**The plant output is modelled, not measured.** Each site has a hypothetical 100 MW PV plant and 100 MW wind farm. Their "actual" output comes from ERA5 reanalysis weather run through documented physical models (pvlib PVWatts for PV, a generic turbine power curve for wind). No real plant data is used.
 
-Built with ❤️ for sustainable energy in Africa | Developed in Pretoria, South Africa 🇿🇦
+![Dashboard](docs/dashboard.png)
 
----
+## Results
 
-## 🎯 Project Highlights
+Test period: 1 October 2025 to 30 September 2026, a full year the model never saw. The model's inputs are the ECMWF forecasts that were issued 24 hours before each hour, so it only sees what a forecaster would have had. Errors are in MW for a 100 MW plant, so 1 MW is 1% of capacity. Solar is scored on daylight hours only (13,245 hours over three sites; mean output 44.6 MW). Wind is scored on all hours (26,280 hours; mean output 15.0 MW).
 
-- ⚡ **100% Accuracy** for solar energy predictions (R² = 0.998)
-- 🌬️ **97.35% Accuracy** for wind energy predictions (R² = 0.988)
-- 🚀 **<300ms Prediction Latency** for real-time decision making
-- 💰 **35-40% Cost Reduction** through intelligent grid optimization
-- 📈 **99.5% System Uptime** with robust error handling
-- 🌍 **Africa-Focused** with South African location data and expansion ready
+| Method | Solar MAE | Solar RMSE | Wind MAE | Wind RMSE |
+|---|---|---|---|---|
+| XGBoost on day-ahead forecast weather | **4.77** | **7.84** | **6.22** | **10.09** |
+| Physical model on the same forecast weather (no ML) | 5.13 | 8.05 | 6.53 | 11.65 |
+| Seasonal naive (same hour yesterday) | 10.17 | 16.92 | 15.74 | 25.18 |
+| Persistence (value at 23:00, held for the next day) | 44.55 | 53.32 | 14.46 | 23.36 |
 
----
+Skill (1 minus model MAE over baseline MAE):
 
-**Key Features:**
-- Real-time 7-day energy forecasts
-- Interactive cost optimization panel
-- Multi-location support (Pretoria, Cape Town, Johannesburg, Durban, Port Elizabeth)
-- Dark mode responsive design
-- Live performance metrics
+| Baseline | Solar | Wind |
+|---|---|---|
+| Physical model on forecast weather | 6.9% | 4.8% |
+| Seasonal naive | 53.1% | 60.5% |
+| Persistence | 89.3% | 57.0% |
 
----
+What this means:
 
-## 🏗️ Architecture
+- Most of the gain over the naive baselines comes from the weather forecast itself. Plugging the forecast into the physical model already cuts the seasonal-naive error by half or more.
+- XGBoost adds a little on top: 6.9% lower MAE for solar and 4.8% for wind. For wind it cuts RMSE by 13.3%, so it helps most on large misses.
+- The gain is not the same everywhere. For solar at Pretoria the model barely beats the physical model (MAE 5.34 vs 5.37), and at De Aar its solar RMSE is slightly worse (7.23 vs 7.19). For wind at De Aar the MAE gain is 0.5% (7.56 vs 7.60).
+- Persistence is a weak baseline for solar by design: at midnight the last value is zero.
+
+Per site, MAE in MW (model / physical / seasonal naive / persistence):
+
+| Site | Solar | Wind |
+|---|---|---|
+| Pretoria, Gauteng | 5.34 / 5.37 / 8.98 / 43.24 | 4.14 / 4.34 / 8.06 / 8.23 |
+| De Aar, Northern Cape | 4.14 / 4.45 / 8.98 / 48.34 | 7.56 / 7.60 / 17.21 / 18.98 |
+| Jeffreys Bay, Eastern Cape | 4.85 / 5.56 / 12.54 / 42.07 | 6.95 / 7.65 / 21.97 / 16.19 |
+
+![MAE by site](docs/mae_by_site.png)
+
+Ten days of held-out forecasts at De Aar:
+
+![Backtest at De Aar](docs/backtest_de_aar.png)
+
+All numbers come from `python run_training.py` and are saved in [docs/metrics.json](docs/metrics.json). Training is deterministic; two runs gave the same scores.
+
+### A lesson from the first attempt
+
+My first run used Open-Meteo's default `best_match` forecast source. The model then lost to the physical baseline (wind MAE 7.49 vs 5.50). In every test month the model over-forecast wind by 0.4 to 5.6 MW on average, while the physical model stayed within 1.8 MW. The likely cause: Open-Meteo's archive of the newer 9 km ECMWF model starts in autumn 2025, and after that the `best_match` wind forecasts were less biased against ERA5 than in the training period. The model kept correcting a bias that had shrunk. Pinning one model (ECMWF IFS 0.25°) for training, testing and the live forecast fixed it.
+
+### Speed
+
+In one local run the first forecast request took 8.7 s (cold start). Later 7-day requests took about 0.28 s, nearly all of it the call to Open-Meteo; the two model predictions took under 20 ms. The dashboard shows the request times the running API has measured, not fixed numbers.
+
+## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     DATA INGESTION LAYER                        │
-│  Open-Meteo API → Weather Data → Feature Engineering (15+)     │
-└────────────────────────┬────────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────────┐
-│                    MACHINE LEARNING LAYER                       │
-│  XGBoost Models → Solar/Wind Predictions (97-100% accuracy)    │
-│  LSTM Models → Time-Series Forecasting (Optional)               │
-└────────────────────────┬────────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────────┐
-│                   OPTIMIZATION LAYER                            │
-│  PuLP Linear Programming → Cost-Optimized Allocation (35-40% ↓) │
-└────────────────────────┬────────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────────┐
-│                    API & DASHBOARD LAYER                        │
-│  FastAPI Backend → React/TypeScript Frontend → Visualizations   │
-└─────────────────────────────────────────────────────────────────┘
+Open-Meteo Historical Weather API (ERA5)  --> physical PV and wind models --> modelled "actual" output (target)
+Open-Meteo Previous Runs API (ECMWF IFS,  --> features                    --> XGBoost, one model each for solar and wind
+  forecast made 24 h before each hour)
+Open-Meteo Forecast API (same IFS model)  --> same features               --> live 7-day forecast on the dashboard
 ```
 
----
+1. **Data** (`backend/data_processing/ingestion.py`): hourly GHI, DNI, diffuse radiation, temperature, cloud cover, and wind at 10 m and 100 m, from 1 April 2024 (when the 100 m day-ahead archive starts) to 30 September 2026.
+2. **Modelled output** (`power_model.py`): PV is a fixed-tilt array facing north at latitude tilt, 120 MW DC on 100 MW AC, with NREL SPA solar position, isotropic plane-of-array irradiance, Faiman cell temperature, PVWatts DC (-0.4%/°C) and inverter models, and 14% system losses. Wind uses 100 m wind speed and a generic curve: cut-in 3 m/s, cubic ramp to rated output at 12 m/s, cut-out 25 m/s, 10% farm losses.
+3. **Features** (`feature_engineering.py`): forecast weather, 3-hour centred means of forecast radiation and wind, wind direction, hour and day of year as sine and cosine, sun elevation, site latitude and longitude, and the physical models applied to the forecast weather. No feature uses plant output.
+4. **Split** (`ml/train.py`): train April 2024 to June 2025, early-stopping validation July to September 2025, test October 2025 to September 2026. No random split, no shuffling.
+5. **Baselines** (`ml/baselines.py`): a forecast issued at midnight for the next 24 hours. Persistence holds the value at 23:00 the day before; seasonal naive uses the same hour the day before. The physical model on forecast weather is the no-ML reference.
+6. **API** (`backend/api/main.py`): `GET /locations`, `POST /forecast`, `POST /optimize`, `GET /metrics` (held-out scores plus measured request times), `GET /health`. Docs at `/docs`.
+7. **Dispatch demo** (`optimization/cost_optimizer.py`): a one-hour linear program (PuLP and CBC) that meets demand from forecast solar and wind, then hydro, coal and gas. The costs (USD/MWh: solar 5, wind 5, hydro 40, coal 60, gas 150) are placeholders, not market data. The saving it reports is against the same dispatch without solar and wind.
 
-## 🚀 Quick Start
+## How to run
 
-### Prerequisites
-- Python 3.9+
-- Node.js 18+
-- 4GB RAM minimum
-- Internet connection (for weather data)
-
-### Installation (5 minutes)
+Tested on Windows 11 with Python 3.12 and Node 22.
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/Letsapatiiso07/renewable-energy-forecasting-dashboard.git
-cd renewable-energy-forecasting-dashboard
-
-# 2. Backend Setup
+# Backend
 cd backend
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 3. Initialize Data (fetches weather data)
-python run_initialization.py
+python run_initialization.py       # downloads weather data (about 5 minutes), builds data/processed/dataset.csv
+python run_training.py             # trains both models (about 15 seconds), writes data/models/ and docs/ figures
+uvicorn api.main:app --port 8000   # API at http://localhost:8000/docs
 
-# 4. Train ML Models (2-5 minutes)
-python run_training.py
-
-# 5. Start Backend API
-uvicorn api.main:app --reload --port 8000
-
-# 6. In a new terminal - Frontend Setup
+# Frontend, in a second terminal
 cd frontend
-npm install
-npm run dev
+npm ci
+npm run dev                        # dashboard at http://localhost:5173
 ```
 
-**Access the dashboard:** http://localhost:5173  
-**API Documentation:** http://localhost:8000/docs
+The frontend calls `http://localhost:8000` by default; set `VITE_API_URL` to change it. Downloads are cached in `data/raw/`; use `python run_initialization.py --refresh` to fetch again.
 
----
-
-## 📈 Model Performance
-
-### XGBoost Models (Primary)
-
-| Model | MAE (MW) | RMSE (MW) | R² Score | Accuracy | Status |
-|-------|----------|-----------|----------|----------|--------|
-| Solar | 0.09 | 0.19 | **0.998** | **100%** | ✅ Exceeds Target |
-| Wind  | 1.75 | 4.10 | **0.988** | **97.35%** | ✅ Exceeds Target |
-
-**Target:** 88% accuracy (Exceeded by 9-12%)
-
-### System Performance
-
-| Metric | Target | Achieved | Status |
-|--------|--------|----------|--------|
-| Prediction Latency | <300ms | 250ms avg | ✅ |
-| System Uptime | 99.5% | 99.5% | ✅ |
-| Cost Reduction | 35% | 35-40% | ✅ |
-| Daily Throughput | 10k predictions | 12k+ | ✅ |
-
----
-
-## 🔬 Technical Deep Dive
-
-### Machine Learning Pipeline
-
-**Feature Engineering (15+ Features):**
-- **Temporal:** Hour, day, season with cyclical encoding
-- **Solar:** Radiation potential, efficiency factors, temperature impact
-- **Wind:** Power potential (cubic relationship), direction encoding
-- **Lag Features:** 1h, 3h, 6h, 12h, 24h, 48h, 72h historical data
-- **Rolling Statistics:** 6h, 12h, 24h moving averages and standard deviations
-- **Interactions:** Temperature × cloud cover, radiation × humidity
-
-**Model Architecture:**
-```python
-XGBoost Regressor (Primary)
-├── 200 estimators
-├── Max depth: 8
-├── Learning rate: 0.05
-├── Early stopping: 20 rounds
-└── Features: 96 engineered features
-
-LSTM Alternative (Optional)
-├── 128 LSTM units
-├── Dropout: 0.2
-├── Dense layers: 64 → 32 → 1
-└── Sequence length: 24 hours
-```
-
-### Cost Optimization Engine
-
-**Linear Programming Model:**
-```
-Objective: Minimize Σ(source_i × cost_i)
-
-Constraints:
-  - Total output ≥ Demand
-  - 0 ≤ source_i ≤ capacity_i
-  - Renewable sources prioritized
-
-Cost Factors ($/kWh):
-  Solar: $0.05  |  Wind: $0.05  |  Hydro: $0.08
-  Gas:   $0.12  |  Coal: $0.15
-```
-
-**Example Optimization:**
-- Input: 400 MW demand, 80 MW solar, 60 MW wind available
-- Output: 38.5% cost savings, 85% renewable energy mix
-
----
-
-## 📁 Project Structure
-
-```
-renewable-energy-forecasting-dashboard/
-├── backend/                    # Python backend
-│   ├── api/                   # FastAPI application
-│   ├── data_processing/       # ETL pipelines
-│   ├── ml/                    # ML models (XGBoost, LSTM)
-│   ├── optimization/          # PuLP cost optimizer
-│   ├── airflow/              # Workflow orchestration
-│   └── utils/                # Configuration & logging
-├── frontend/                  # React/TypeScript frontend
-│   └── src/
-│       ├── components/       # Dashboard, charts, panels
-│       └── services/         # API client
-├── data/                     # Data storage
-│   ├── raw/                 # Weather data
-│   ├── processed/           # Engineered features
-│   └── models/              # Trained models
-├── tests/                    # Unit & integration tests
-└── docs/                     # Documentation
-```
-
-**Total:** ~2,000 lines of clean, production-ready code
-
----
-
-## 🌍 Africa-Specific Features
-
-### Supported Locations
-1. **Pretoria** - High solar potential, moderate wind
-2. **Cape Town** - Strong coastal winds, excellent solar
-3. **Johannesburg** - Urban energy hub
-4. **Durban** - Coastal climate, consistent generation
-5. **Port Elizabeth** - Wind corridor optimization
-
-### Regional Insights
-- Solar radiation patterns optimized for Southern Africa (23°S - 34°S latitude)
-- Seasonal wind variations (Karoo region considerations)
-- Grid demand patterns for Sub-Saharan Africa
-- Cost structures adapted for African energy markets
-
-### Data Sources
-- **Open-Meteo API** - Free, no API key required
-- **ENERGYDATA.INFO** - African renewable energy datasets
-- **Ember Climate** - Global electricity statistics
-- **World Bank** - Energy infrastructure data
-
----
-
-## 🛠️ Technology Stack
-
-### Backend
-- **Python 3.9+** - Core programming language
-- **FastAPI** - High-performance async API framework
-- **XGBoost 2.0** - Gradient boosting for predictions
-- **TensorFlow/Keras** - Deep learning (LSTM models)
-- **PuLP** - Linear programming optimization
-- **Apache Airflow** - Workflow orchestration
-- **Pandas/NumPy** - Data processing
-- **Scikit-learn** - ML utilities
-
-### Frontend
-- **React 18** - UI framework
-- **TypeScript** - Type-safe JavaScript
-- **Vite** - Fast build tool
-- **TailwindCSS** - Utility-first styling
-- **Recharts** - Data visualization
-- **Axios** - HTTP client
-
-### Infrastructure
-- **SQLite** - Local database (PostgreSQL for production)
-- **Uvicorn** - ASGI server
-- **GitHub Actions** - CI/CD (optional)
-
----
-
-## 📊 API Documentation
-
-### Endpoints
-
-#### `GET /locations`
-Returns available forecast locations.
-
-#### `POST /forecast`
-Get energy predictions for a location.
-
-**Request:**
-```json
-{
-  "location": "pretoria",
-  "days": 7
-}
-```
-
-**Response:**
-```json
-[
-  {
-    "location": "pretoria",
-    "timestamp": "2026-01-12T12:00:00",
-    "solar_forecast_mw": 82.5,
-    "wind_forecast_mw": 45.2
-  }
-]
-```
-
-#### `POST /optimize`
-Optimize energy allocation for cost minimization.
-
-**Request:**
-```json
-{
-  "demand_mw": 400,
-  "solar_available": 80,
-  "wind_available": 60
-}
-```
-
-**Response:**
-```json
-{
-  "status": "optimal",
-  "allocation": {
-    "solar_mw": 80,
-    "wind_mw": 60,
-    "coal_mw": 60,
-    "hydro_mw": 200
-  },
-  "cost_reduction_pct": 39.2,
-  "renewable_percentage": 85
-}
-```
-
-**Full API Docs:** http://localhost:8000/docs
-
----
-
-## 🧪 Testing
+Tests (offline, synthetic data), from the repository root with the backend environment active:
 
 ```bash
-# Backend tests (85%+ coverage)
-cd backend
-pytest tests/ -v --cov=.
-
-# Frontend tests
-cd frontend
-npm test
+pytest
 ```
 
----
+## Data source and licence
 
-## 🚀 Deployment
+- Weather data by [Open-Meteo.com](https://open-meteo.com/), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Downloaded 23 October 2026.
+  - Historical Weather API, model `era5`: ERA5 reanalysis from the Copernicus Climate Change Service (C3S).
+  - Previous Runs API and Forecast API, model `ecmwf_ifs025`: ECMWF IFS open data forecasts.
+- The free Open-Meteo API is meant for non-commercial use.
+- Downloaded data (about 8 MB) and the built dataset (about 22 MB) are not in git. `run_initialization.py` fetches them again.
+- Code: MIT licence, see [LICENSE](LICENSE).
 
-### Local Development
-See Quick Start section above.
+## Limits and next steps
 
-### Production Deployment
-- **Cloud Platforms:** DigitalOcean, Linode, AWS EC2, Azure
-- **Recommended:** 4 CPU, 8GB RAM, 50GB SSD
-- **SSL:** Let's Encrypt (free)
-- **Monitoring:** Prometheus + Grafana
-- **Database:** Migrate to PostgreSQL for production
+- **Modelled output.** The scores show how well a day-ahead forecast plus ML predicts ERA5-driven modelled output. Real plants add outages, curtailment, soiling, trackers and direction-dependent wake losses, so real errors would be larger. Next step: train on measured generation, for example Eskom's hourly wind and PV data, after checking its licence.
+- **Low wind output.** ERA5 100 m wind with a generic power curve gives mean output of 15 MW per 100 MW overall and 7 MW at Pretoria, below what South African wind farms report.
+- **Lead time.** The model is tested only on forecasts made 24 hours ahead. The dashboard shows up to 7 days; days 2 to 7 will be less accurate, and I have not measured by how much.
+- **One split.** One test year and no uncertainty bands. Next: rolling-origin evaluation and quantile forecasts.
+- **Simple dispatch.** One hour at a time, placeholder costs, no ramp limits, reserves or network.
+- **No scheduler.** Rerun the two scripts to refresh data and models. An earlier Airflow DAG was removed because it called the broken pipeline and was never run.
 
-**Detailed deployment guide:** See `DEPLOYMENT_GUIDE.md`
+### What changed from the first version
 
-## 🤝 Contributing
+The first version reported 100% accuracy for solar and 97% for wind. Those numbers came from leakage and are gone:
 
-We welcome contributions from the community! 
+- Features were built from the target: `radiation_efficiency` divided solar output by radiation, and rolling means of output included the current hour.
+- Hourly rows were split at random, so test hours sat between training hours.
+- "Accuracy" counted any prediction within 15% plus 1 MW as correct.
+- The live forecast filled the output-lag features with zeros, so served predictions did not match training.
+- The historical weather URL returned 404, and wind speeds in km/h were treated as m/s.
+- Latency, uptime, prediction counts and the 35% cost saving were typed into the code and README.
+- The frontend did not compile and the tests failed.
 
-**Ways to contribute:**
-- 🐛 Report bugs
-- 💡 Suggest features
-- 📝 Improve documentation
-- 🔧 Submit pull requests
-- 🌍 Add new African locations
-- 📊 Share datasets
+## Author
 
-**Contribution Guidelines:**
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-**Code Style:**
-- Python: PEP8 (use `black` formatter)
-- TypeScript: ESLint + Prettier
-- Test coverage: 80%+ required
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-**In short:** You can use, modify, and distribute this project for free, even commercially, as long as you include the original copyright notice.
-
----
-
-## 👨‍💻 Author
-
-**Your Name**
-- 📍 Location: Pretoria, South Africa
-- 💼 LinkedIn: (https://linkedin.com/in/tiiso-letsapa-664990209)
-- 🐙 GitHub: (https://github.com/Letsapatiiso07)
-- 📧 Email: Letsapamyron07@gmail.com
-
----
-
-## 🙏 Acknowledgments
-
-- **Open-Meteo** - Free weather API with no rate limits
-- **ENERGYDATA.INFO** - African renewable energy datasets
-- **Anthropic (Claude)** - AI assistance in development
-- **South African Power Pool** - Grid insights and data
-- **Ember Climate** - Global electricity statistics
-- **Open Source Community** - For amazing tools and libraries
-
----
-
-## 📊 Project Statistics
-
-- **Development Time:** 40-60 hours
-- **Total Code:** ~2,000 lines
-- **Test Coverage:** 85%+
-- **Dependencies:** 37 packages
-- **Stars:** ⭐ (Give us a star!)
-- **Contributors:** Welcome!
-
----
-
-## 🌟 Star History
-
-If you find this project useful, please consider giving it a ⭐!
-
----
-
-## 📞 Support
-
-- **Documentation:** See `/docs` folder
-- **Issues:** [GitHub Issues](https://github.com/Letsapatiiso07/renewable-energy-forecasting-dashboard)
-- **Email:** Letsapamyron07@gmail.com
-
----
-
-## 🎓 Academic Use
-
-This project is suitable for:
-- Final year projects
-- Master's thesis
-- Research publications
-- Teaching materials
-- Case studies
-
-**Citation:**
-```bibtex
-@software{renewable_energy_forecasting_2026,
-  title={Renewable Energy Forecasting Dashboard for Africa},
-  author={Tiiso},
-  year={2026},
-  publisher={GitHub},
-  url={https://github.com/Letsapatiiso07/renewable-energy-forecasting-dashboard}
-}
-```
-
----
-
-## 🌍 Impact
-
-This project contributes to:
-- 🌱 **SDG 7:** Affordable and Clean Energy
-- 🌍 **SDG 13:** Climate Action
-- 🏭 **SDG 9:** Industry, Innovation and Infrastructure
-
-**Estimated Impact:**
-- Potential 35% cost savings for African utilities
-- Better integration of renewable energy sources
-- Reduced carbon emissions through optimized dispatch
-
----
-
-**Built with ❤️ for a sustainable future in Africa**
-
-[⬆ Back to top](#-renewable-energy-forecasting-dashboard-for-africa)
+Tiiso Letsapa, Letsapamyron07@gmail.com
