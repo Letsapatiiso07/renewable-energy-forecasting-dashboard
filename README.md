@@ -111,7 +111,7 @@ pytest
   - Previous Runs API and Forecast API, model `ecmwf_ifs025`: ECMWF IFS open data forecasts.
 - The free Open-Meteo API is meant for non-commercial use.
 - Downloaded data (about 8 MB) and the built dataset (about 22 MB) are not in git. `run_initialization.py` fetches them again.
-- Code: MIT licence, see [LICENSE](LICENSE).
+- Code: copyright Tiiso Letsapa, all rights reserved, see [LICENSE](LICENSE).
 
 ## Limits and next steps
 
